@@ -34,12 +34,13 @@
             bottom: 0;
             left: 0;
             width: 100%;
-            background: rgba(0, 0, 0, 0.7);
+            background: rgba(0, 0, 0, 0.8);
             color: white;
             padding: 5px 10px;
             font-family: monospace;
             font-size: 14px;
             z-index: 1000;
+            box-sizing: border-box;
         }
         .status-success { color: #00FF00; }
         .status-failure { color: #FF6347; }
@@ -48,7 +49,7 @@
 </head>
 <body>
     <div id="video-container">
-        <video id="rtc-video" autoplay controls muted style="display: block;"></video>
+        <video id="rtc-video" autoplay muted style="display: block;"></video>
     </div>
 
     <div id="status-bar">
@@ -59,130 +60,194 @@
     <script>
         let pyHandler;
         let rtcPlayer;
+        let statusCheckInterval;
 
         const jsStatus = document.getElementById('jsStatus');
         const playerStatus = document.getElementById('playerStatus');
         const videoElement = document.getElementById('rtc-video');
 
         function findRTCPlayerClass() {
-            if (typeof Interactive !== 'undefined' && typeof Interactive.RTCPlayer === 'function') {
-                return Interactive.RTCPlayer;
+            // 增强的播放器类检测逻辑
+            pyHandler.log(`【播放器检测】全局对象检测: Interactive=${typeof Interactive}, RTCPlayer=${typeof RTCPlayer}`);
+
+            // 检测可能的播放器类存在形式
+            if (window.Interactive && typeof window.Interactive.RTCPlayer === 'function') {
+                pyHandler.log(`【播放器检测】使用 Interactive.RTCPlayer`);
+                return window.Interactive.RTCPlayer;
             }
-            if (typeof RTCPlayer === 'function') {
-                return RTCPlayer;
+            if (typeof window.RTCPlayer === 'function') {
+                pyHandler.log(`【播放器检测】使用全局 RTCPlayer`);
+                return window.RTCPlayer;
+            }
+            if (window.VMS && typeof window.VMS.RTCPlayer === 'function') {
+                pyHandler.log(`【播放器检测】使用 VMS.RTCPlayer`);
+                return window.VMS.RTCPlayer;
             }
             return null;
         }
 
-        /**
-         * 注册播放器事件监听器，用于更精细的诊断。
-         */
         function registerPlayerListeners(player) {
+            if (statusCheckInterval) clearInterval(statusCheckInterval);
 
-            // 监听连接状态变化 (如 WebRTC/XRTC 连接成功)
-            player.onConnect = (data) => {
-                pyHandler.log('【Player Event】onConnect: 媒体流连接成功（信令已完成）。');
-                playerStatus.innerHTML = '<span class="status-success">✅ Stream CONNECTED!</span>';
-            };
-
-            // 监听视频元素开始播放事件 (表示数据已接收且正在解码)
-            videoElement.addEventListener('play', () => {
-                pyHandler.log('【Video Event】Video Element is now PLAYING (Data is flowing).');
-                // 此时黑屏意味着编解码器失败
-                playerStatus.innerHTML = '<span class="status-warning">⚠️ Stream PLAYING, CHECKING CODEC...</span>';
+            player.on("connect", (data) => {
+                pyHandler.log('【XRTC Event】连接成功，正在协商媒体流...');
+                playerStatus.innerHTML = '<span class="status-warning">⚠️ 正在建立媒体连接/协商SDP...</span>';
             });
 
-            // 监听视频元素的第一帧渲染
-            videoElement.addEventListener('playing', () => {
-                pyHandler.log('【Video Event】Video Element received FIRST FRAME!');
-                playerStatus.innerHTML = '<span class="status-success">✅ VIDEO IS RENDERING!</span>';
+            player.on("track", (track) => {
+                pyHandler.log(`【媒体轨详情】类型: ${track.kind}，ID: ${track.id}，就绪状态: ${track.readyState}`);
+                if (track.kind === 'video') {
+                    track.onended = () => pyHandler.log(`【视频轨结束】轨道已终止传输`);
+                    track.onmute = () => pyHandler.log(`【视频轨静音】轨道被静音`);
+                }
             });
 
-            // 监听视频元素加载元数据 (通常在连接成功后很快发生)
+            player.on("sdp", (sdp) => {
+                const videoLine = sdp.split('\n').find(line => line.startsWith('m=video'));
+                if (videoLine) {
+                    const codecNumbers = videoLine.split(' ').slice(3);
+                    pyHandler.log(`【SDP协商】视频编码编号: ${codecNumbers.join(',')}`);
+                }
+            });
+
+            player.on("error", (err) => {
+                pyHandler.log(`【XRTC 内部错误】${err.type || 'Unknown'}: ${err.message || JSON.stringify(err)}`);
+                playerStatus.innerHTML = `<span class="status-failure">❌ XRTC错误: ${err.message || '未知错误'}</span>`;
+            });
+
+            player.on("iceconnectionstatechange", (state) => {
+                pyHandler.log(`【ICE状态详细日志】当前状态: ${state}`);
+                if (rtcPlayer && rtcPlayer.iceGatheringState) {
+                    pyHandler.log(`【ICE收集状态】${rtcPlayer.iceGatheringState}`);
+                }
+                let msg = '';
+                switch(state) {
+                    case "failed":
+                    case "disconnected":
+                        msg = '<span class="status-failure">❌ ICE连接失败，请检查网络/防火墙</span>';
+                        break;
+                    case "connected":
+                        msg = '<span class="status-success">✅ ICE连接成功 (网络通路已建立)</span>';
+                        break;
+                    case "checking":
+                        msg = '<span class="status-warning">⚠️ ICE正在检查网络连通性...</span>';
+                        break;
+                    default:
+                        msg = `<span class="status-warning">⚠️ ICE状态: ${state}</span>`;
+                }
+                playerStatus.innerHTML = msg;
+            });
+
             videoElement.addEventListener('loadedmetadata', () => {
                 pyHandler.log(`【Video Event】Loaded Metadata: ${videoElement.videoWidth}x${videoElement.videoHeight}`);
+                const mediaStream = videoElement.srcObject;
+                if (mediaStream) {
+                    const videoTracks = mediaStream.getVideoTracks();
+                    if (videoTracks.length > 0) {
+                        pyHandler.log(`【解码信息】视频轨标签/ID: ${videoTracks[0].label || videoTracks[0].id}`);
+                    }
+                }
             });
 
-            // 监听错误
-            player.onStatusChange = (status) => {
-                pyHandler.log(`【Player Event】Status Change: ${JSON.stringify(status)}`);
-            };
+            videoElement.addEventListener('play', () => {
+                pyHandler.log('【Video Event】Video Element is now PLAYING (Data is flowing).');
+            });
 
-            player.onError = (err) => {
-                pyHandler.log(`【Player Event】FATAL Error: ${JSON.stringify(err)}`);
-                playerStatus.innerHTML = `<span class="status-failure">❌ Player Fatal Error: ${err.message || JSON.stringify(err)}</span>`;
-            };
+            videoElement.addEventListener('playing', () => {
+                pyHandler.log('【Video Event】Video Element received FIRST FRAME! (Success!)');
+                playerStatus.innerHTML = '<span class="status-success">✅ VIDEO IS RENDERING (播放成功)!</span>';
+            });
 
-            // 监听网络错误
             videoElement.addEventListener('error', (e) => {
-                const errMsg = e.target.error ? e.target.error.message : 'Unknown Video Error';
-                pyHandler.log(`【Video Error】Video Element Error: ${e.target.error.code} - ${errMsg}`);
+                const error = e.target.error;
+                const errMsg = error ? `Code ${error.code}: ${error.message}` : 'Unknown Video Error';
+                pyHandler.log(`【Video Error】Video Element Error: ${errMsg}`);
+                playerStatus.innerHTML = `<span class="status-failure">❌ 视频元素错误: ${errMsg}</span>`;
             });
+
+            statusCheckInterval = setInterval(() => {
+                if (rtcPlayer) {
+                    const status = rtcPlayer.status || rtcPlayer.state || rtcPlayer.getStatus?.() || 'unknown';
+                    const isMuted = videoElement.muted ? 'Muted' : 'Unmuted';
+                    pyHandler.log(`【播放器状态检查】Status: ${status}, Mute: ${isMuted}, Time: ${videoElement.currentTime.toFixed(2)}s`);
+
+                    if (['playing', 'connected', 'streaming'].includes(status) && videoElement.currentTime === 0 && !videoElement.paused) {
+                        pyHandler.log(`【播放器警告】已连接但视频时间未推进，可能卡顿或解码失败！`);
+                    }
+                }
+            }, 3000);
         }
 
-
-        /**
-         * 接收 Python 传递的流信息，并初始化播放器。
-         */
         function onStreamUrlReady(streamInfoJson) {
             pyHandler.log('Received stream URL from Python, attempting to initialize player...');
+            pyHandler.log(`【原始流信息】${streamInfoJson}`);
 
             const RTCPlayerClass = findRTCPlayerClass();
-
-            if (RTCPlayerClass) {
-                playerStatus.innerHTML = '<span class="status-success">✅ RTCPlayer FOUND!</span>';
-
-                try {
-                    const streamInfo = JSON.parse(streamInfoJson);
-
-                    if (rtcPlayer && typeof rtcPlayer.destroy === 'function') {
-                        rtcPlayer.destroy();
-                        pyHandler.log('Destroyed old rtcPlayer instance.');
-                    }
-
-                    videoElement.style.display = 'block';
-
-                    const playerConfig = {
-                        url: streamInfo.streamUrl,
-                        container: document.getElementById('video-container'),
-                        videoElement: videoElement,
-                        playerType: streamInfo.playerType || 12,
-                    };
-
-                    rtcPlayer = new RTCPlayerClass(playerConfig);
-                    registerPlayerListeners(rtcPlayer); // 注册监听器
-
-                    // 【核心修正】：设置 XRTC 专属配置对象 (基于 XrtcPlayer.vue)
-                    if (streamInfo.xrtcStreamConfig) {
-                        // 赋值给 rtcPlayer.stream 属性，这是 XRTC 协议的正确入会认证方式
-                        rtcPlayer.stream = streamInfo.xrtcStreamConfig;
-                        pyHandler.log(`【XRTC Config】Assigned stream config to rtcPlayer.stream (PlayerType 12).`);
-                    } else {
-                        pyHandler.log(`【ERROR】Missing xrtcStreamConfig! XRTC stream may fail.`);
-                    }
-
-                    pyHandler.log('RTCPlayer instance created. Attempting to play...');
-
-                    rtcPlayer.play().then(() => {
-                        pyHandler.log('RTCPlayer play() promise resolved (Signaling Complete).');
-
-                        videoElement.muted = true;
-                        videoElement.play();
-
-                    }).catch(err => {
-                        playerStatus.innerHTML = `<span class="status-failure">❌ Play Error: ${err.name}: ${err.message}</span>`;
-                        pyHandler.log(`【JS ERROR】RTCPlayer play() failed: ${err.name}: ${err.message}`);
-                    });
-
-                } catch (e) {
-                    playerStatus.innerHTML = `<span class="status-failure">❌ Initialization Error: ${e.message}</span>`;
-                    pyHandler.log(`【JS FATAL】播放器初始化逻辑失败: ${e.message}. Stack: ${e.stack}`);
-                }
-
-            } else {
+            if (!RTCPlayerClass) {
                 const errorMsg = '未找到 Interactive.RTCPlayer 或其他播放器类。';
                 pyHandler.log(`【致命错误】RTC 播放器库: ${errorMsg}`);
                 playerStatus.innerHTML = `<span class="status-failure">❌ ${errorMsg}</span>`;
+                return;
+            }
+
+            try {
+                const streamInfo = JSON.parse(streamInfoJson);
+                pyHandler.log(`【解析后流信息】${JSON.stringify(streamInfo, null, 2)}`);
+
+                // 映射参数，兼容播放器命名
+                const streamConfig = {
+                    sid: streamInfo.xrtcStreamConfig.sid,
+                    server: streamInfo.xrtcStreamConfig.server,
+                    roomId: streamInfo.xrtcStreamConfig.roomId,
+                    token: streamInfo.xrtcStreamConfig.token,
+                    appId: streamInfo.xrtcStreamConfig.appId,
+                    userId: streamInfo.xrtcStreamConfig.userId,
+                    timeStr: streamInfo.xrtcStreamConfig.timeStr
+                };
+                pyHandler.log(`【准备传入的 stream 配置（映射后）】${JSON.stringify(streamConfig, null, 2)}`);
+
+                // 初始化播放器
+                rtcPlayer = new RTCPlayerClass({
+                    stream: streamConfig,
+                    playerType: 12,
+                    container: document.getElementById('video-container'),
+                    videoElement: videoElement
+                });
+
+                // 弱化验证，以play()方法存在性为准
+                if (typeof rtcPlayer.play !== 'function') {
+                    throw new Error("播放器实例没有play()方法");
+                }
+                pyHandler.log(`【播放器配置验证】构造函数初始化成功，准备调用play()`);
+
+                // 注册监听器并播放
+                registerPlayerListeners(rtcPlayer);
+                pyHandler.log('Attempting to start XRTC stream...');
+                const playPromise = rtcPlayer.play();
+
+                // 执行播放
+                if (typeof rtcPlayer.play === 'function') {
+                    const playPromise = rtcPlayer.play();
+                    if (playPromise instanceof Promise) {
+                        playPromise.then(() => {
+                            pyHandler.log('XRTC play() resolved successfully');
+                            // 解除静音（处理浏览器自动播放限制）
+                            videoElement.muted = false;
+                        }).catch(err => {
+                            throw new Error(`play() rejected: ${err.message}`);
+                        });
+                    } else {
+                        // 非Promise版本的play()
+                        pyHandler.log('XRTC play() executed (non-Promise)');
+                        videoElement.muted = false;
+                    }
+                } else {
+                    throw new Error("播放器实例没有play()方法");
+                }
+
+            } catch (e) {
+                pyHandler.log(`【JS FATAL】初始化异常: ${e.message}. Stack: ${e.stack}`);
+                playerStatus.innerHTML = `<span class="status-failure">❌ Initialization Error: ${e.message}</span>`;
             }
         }
 
@@ -201,6 +266,15 @@
                 jsStatus.innerHTML = '<span class="status-success">✅ QWebChannel Initialized.</span>';
             });
         }
+
+        window.addEventListener('beforeunload', () => {
+            if (rtcPlayer && typeof rtcPlayer.destroy === 'function') {
+                rtcPlayer.destroy();
+            }
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+            }
+        });
 
         initQWebChannel();
 

@@ -206,45 +206,44 @@ class MainWindow(QMainWindow):
     #         print(f"[ERROR] 解析 WebSocket 响应失败: {e}. 请检查 stream_info_json_string 的内容和键名。")
     @Slot(str)
     def on_stream_url_received(self, stream_info_json_string):
-        """处理 WebSocket 响应，并将 XRTC 专属参数发送给 JS (PlayerType 12)"""
         try:
             full_response = json.loads(stream_info_json_string)
+            if 'payload' not in full_response or 'avatar' not in full_response['payload']:
+                raise ValueError("响应格式错误，缺少 payload.avatar 字段")
+
             avatar_payload = full_response['payload']['avatar']
-            stream_url_value = avatar_payload['stream_url']
+            stream_url_value = avatar_payload.get('stream_url', '')
             stream_extend = avatar_payload.get('stream_extend', {})
 
-            # --- 解析 XRTC URL 结构：xrtcs://domain/roomId ---
-            # 提取 domain/server 部分
+            if not stream_url_value:
+                raise ValueError("stream_url 为空，无法解析服务器地址和房间ID")
             server_url = stream_url_value.rsplit('/', 1)[0]
-            # 提取 roomId
             room_id = stream_url_value.split('/')[-1]
 
-            # --- 构造 XRTC 专属 stream 配置对象 (PlayerType 12 要求) ---
-            # 这些字段是 XrtcPlayer.vue 示例揭示的正确入会参数
+            user_id = f"user_{int(time.time() * 1000)}"
+            time_str = str(int(time.time() * 1000))
+
+            # 修正参数命名，匹配文档和播放器要求
             xrtc_stream_config = {
                 "sid": avatar_payload.get('cid', ''),
-                "server": server_url,
+                "server": server_url.replace('xrtcs://', 'http://'),
                 "roomId": room_id,
-                "auth": stream_extend.get('user_sign', ''),  # user_sign 对应 auth
-                "appid": stream_extend.get('appid', ''),
-                # 可选：如果需要，可以添加 userId, timeStr
+                "token": stream_extend.get('user_sign', ''),  # 原auth改为token
+                "appId": stream_extend.get('appid', ''),  # 驼峰命名
+                "userId": user_id,
+                "timeStr": time_str
             }
 
             stream_info_for_js = {
-                "playerType": 12,  # 【关键修正】：使用 XRTC 专属 PlayerType 12
+                "playerType": 12,
                 "streamUrl": stream_url_value,
                 "videoSize": {"width": 1280, "height": 720},
-                # 传递 XRTC 专属配置对象
                 "xrtcStreamConfig": xrtc_stream_config
             }
-
-            stream_info_json = json.dumps(stream_info_for_js)
-            self.py_handler.streamUrlReady.emit(stream_info_json)
-            print(f"[GUI] Successfully processed and sent stream info to JS (XRTC PlayerType 12).")
+            self.py_handler.streamUrlReady.emit(json.dumps(stream_info_for_js))
 
         except Exception as e:
-            print(f"[ERROR] 解析 WebSocket 响应或构造 XRTC 配置失败: {e}")
-
+            print(f"[ERROR] 处理流信息失败: {e}")
 # ----------------------------------------------------------------------
 # 3. 主程序入口
 # ----------------------------------------------------------------------
