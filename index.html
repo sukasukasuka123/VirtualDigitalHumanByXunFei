@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Xunfei Avatar RTC Player</title>
+
+    <script id="qwebchannel-script"></script>
+    <script id="rtc-player-script"></script>
+
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: black;
+        }
+        #video-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        #video-container video {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: contain;
+            display: block !important;
+        }
+        /* 状态栏样式 */
+        #status-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.7); /* 半透明黑色背景 */
+            color: white;
+            padding: 5px;
+            font-family: monospace;
+            font-size: 14px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="video-container"></div>
+
+    <div id="status-bar">
+        <span id="js-status" style="color: yellow;">JS Status: Initializing...</span>
+        |
+        <span id="player-status" style="color: yellow;">Player Status: Checking...</span>
+    </div>
+
+    <script>
+        // 确保 Interactive 对象在全局可见
+        var Interactive = typeof Interactive !== 'undefined' ? Interactive : {};
+        let interactivePlayer = null;
+        let pyHandler = null;
+
+        const jsStatus = document.getElementById('js-status');
+        const playerStatus = document.getElementById('player-status');
+
+        // 统一处理 stream_info 的接收和播放器启动逻辑 (WebRTC 模式)
+        function onStreamUrlReady(streamInfoJson) {
+            pyHandler.log('JS: onStreamUrlReady called, JSON received: ' + streamInfoJson.substring(0, 80) + '...');
+
+            // 确保 JSON 可以被解析
+            let streamInfo;
+            try {
+                streamInfo = JSON.parse(streamInfoJson);
+            } catch(e) {
+                pyHandler.log("Fatal Error: Could not parse stream info JSON: " + e.message);
+                return;
+            }
+
+            if (typeof Interactive !== 'undefined' && typeof Interactive.RTCPlayer === 'function') {
+                pyHandler.log('JS: Interactive.RTCPlayer is found. Ready to initialize.');
+                playerStatus.textContent = 'Player Status: ✅ Found RTCPlayer. Starting Playback...';
+                playerStatus.style.color = '#0F0';
+
+                // 1. 播放器初始化
+                if (!interactivePlayer) {
+                     const container = document.getElementById('video-container');
+                     interactivePlayer = new Interactive.RTCPlayer({
+                         container: container,
+                         autoplay: true,
+                         muted: true
+                     });
+
+                     // 播放器事件绑定逻辑
+                     interactivePlayer
+                        .on('play', () => {
+                            pyHandler.log('SDK Event: Player started trying to play (muted).');
+                            if (interactivePlayer.videoElement && interactivePlayer.videoElement.muted) {
+                                 interactivePlayer.videoElement.muted = false;
+                                 interactivePlayer.videoElement.play().catch(e => {
+                                     pyHandler.log('Autoplay audio failed. Please click the video window to enable sound.');
+                                 });
+                            }
+                        })
+                        .on('playing', () => {
+                             pyHandler.log('SDK Event: Player is fully rendering! *** SUCCESS ***');
+                             playerStatus.textContent = 'Player Status: ✅ PLAYING! (Render Success)';
+                             playerStatus.style.color = '#0F0';
+                        })
+                        .on('error', (e) => {
+                             const errorMsg = JSON.stringify(e);
+                             pyHandler.log('SDK Event ERROR: ' + errorMsg);
+                             playerStatus.textContent = 'Player Status: ❌ ERROR! See Python Console for details.';
+                             playerStatus.style.color = '#F00';
+                        })
+                        .on('not-allowed', () => {
+                             pyHandler.log('SDK Event: Play not allowed. Attempting resume.');
+                             interactivePlayer.resume();
+                        });
+
+                     pyHandler.log('RTC Player instance created and mounted.');
+                 }
+
+                 // 2. 设置流信息并开始播放
+                 try {
+                     // 使用扁平化后的属性 (修正了 streamUrl is undefined 错误)
+                     interactivePlayer.playerType = streamInfo.playerType;
+                     interactivePlayer.streamUrl = streamInfo.streamUrl;
+                     interactivePlayer.sid = streamInfo.sid;
+                     interactivePlayer.videoSize = streamInfo.videoSize;
+
+                     pyHandler.log("JS: Starting RTC stream playback with WebRTC data: " + interactivePlayer.streamUrl);
+
+                     interactivePlayer.play()
+                         .then(() => {
+                             pyHandler.log("RTC Player play command sent successfully.");
+                             playerStatus.textContent = 'Player Status: Connecting WebRTC...';
+                             playerStatus.style.color = 'yellow';
+                             pyHandler.sendTextDriver("你好，虚拟人驱动已连接，正在为你展示！");
+                         })
+                         .catch(e => pyHandler.log("RTC Player failed to start playback: " + JSON.stringify(e)));
+
+                 } catch(e) {
+                     pyHandler.log("Error during player setup or play: " + e.message);
+                 }
+
+            } else {
+                pyHandler.log("【致命错误】RTC Player library (Interactive.RTCPlayer) not found! Check file loading.");
+                playerStatus.textContent = 'Player Status: ❌ RTCPlayer NOT FOUND!';
+                playerStatus.style.color = '#F00';
+            }
+        }
+
+
+        // 【关键修复】: QWebChannel 初始化等待函数 (解决 QWebChannel NOT Found)
+        function initQWebChannel() {
+            // 检查 qt 和 QWebChannel 对象是否已定义 (qwebchannel.js 加载后会定义它们)
+            if (typeof qt === 'undefined' || typeof QWebChannel === 'undefined') {
+                // 如果还未定义，等待 50ms 后再次尝试，直到 Python 成功绑定
+                console.warn("QWebChannel not yet available. Retrying in 50ms...");
+                jsStatus.textContent = 'JS Status: Waiting for Python Bridge...';
+                jsStatus.style.color = 'yellow';
+                setTimeout(initQWebChannel, 50);
+                return;
+            }
+
+            // 成功：初始化 QWebChannel
+            new QWebChannel(qt.webChannelTransport, function (channel) {
+                pyHandler = channel.objects.pyHandler;
+                pyHandler.streamUrlReady.connect(onStreamUrlReady);
+
+                pyHandler.log('HTML and QWebChannel initialized. Waiting for stream URL...');
+                jsStatus.textContent = 'JS Status: ✅ QWebChannel Initialized.';
+                jsStatus.style.color = '#0F0';
+            });
+        }
+
+        // 启动等待
+        initQWebChannel();
+
+    </script>
+</body>
+</html>
