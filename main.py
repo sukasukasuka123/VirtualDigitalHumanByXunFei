@@ -251,9 +251,9 @@ class MainWindow(QMainWindow):
 if __name__ == '__main__':
     # 请替换为您自己的配置信息
     url = 'wss://avatar.cn-huadong-1.xf-yun.com/v1/interact'
-    appId = '5989a1fe'
-    appKey = '300f1459c6c953afb330019bd0bd05c5'
-    appSecret = 'YmNiMTc5ZWZjOTcwMmZhMDYyNWM1YjYx'
+    appId = 'c82abf0b'
+    appKey = 'c84d26683fa91755f7dff2caa0560d24'
+    appSecret = 'MmJmYWE5ZTMxMGY4NjZjMzExNWVlNTUw'
     anchorId = 'cnrfb86h2000000004'
     vcn = 'x4_yezi'
 
